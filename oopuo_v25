@@ -1,0 +1,343 @@
+#!/bin/bash
+
+###############################################################################
+# 👾 PROXMOX "OOPUOPU" V25 [CONSCIOUS EDITION]
+# Feature: Manager Logic Restored. Checks for existing cloud before building.
+###############################################################################
+
+# 1. CONFIGURATION
+# -----------------------------------------------------------------------------
+VMID=200
+VM_NAME="oopuopu-cloud"
+CTID=100
+CT_NAME="oopuopu-gateway"
+USER="adminuser"
+PASS="Oopuopu123!"
+VAULT="$HOME/oopuopu_vault"
+
+# IPC Files
+STATUS_FILE="/tmp/oopuopu_status.txt"
+RESULT_FILE="/tmp/oopuopu_data.txt"
+UI_SCRIPT="/tmp/oopuopu_ui.py"
+
+# 2. MANAGER LOGIC (The Fix)
+# -----------------------------------------------------------------------------
+MODE="BUILD"
+
+if qm status $VMID &>/dev/null; then
+    clear
+    echo -e "\033[38;5;226m[!] SYSTEM DETECTED (VM $VMID / CT $CTID)\033[0m"
+    echo ""
+    echo -e "    [1] \033[38;5;46mENTER MONITOR MODE\033[0m (Load Dashboard & Keys)"
+    echo -e "    [2] \033[38;5;196mFACTORY RESET\033[0m      (Wipe & Rebuild)"
+    echo ""
+    read -p "    SELECT OPTION > " CHOICE
+    
+    if [ "$CHOICE" == "1" ]; then
+        MODE="LOAD"
+    fi
+fi
+
+# Clean start
+rm -f "$STATUS_FILE" "$RESULT_FILE"
+echo "INITIALIZING..." > "$STATUS_FILE"
+
+# 3. INSTALL PYTHON (Silent Bootstrap)
+# -----------------------------------------------------------------------------
+if ! command -v python3 &> /dev/null; then
+    apt-get update -qq >/dev/null 2>&1
+    apt-get install -y python3 >/dev/null 2>&1
+fi
+
+# 4. THE VISUAL ENGINE (Python)
+# -----------------------------------------------------------------------------
+cat << 'PY_EOF' > "$UI_SCRIPT"
+import sys, os, time, random, shutil, math
+
+# --- CONFIG ---
+TEXT_STRING = "OOPUO"
+FPS = 30
+SPEED = 0.12
+STAR_COUNT = 70
+STATUS_FILE = "/tmp/oopuopu_status.txt"
+RESULT_FILE = "/tmp/oopuopu_data.txt"
+
+# --- COLORS ---
+def rgb(r, g, b): return f"\033[38;2;{r};{g};{b}m"
+RESET = "\033[0m"
+C_CYAN = rgb(0, 255, 255)
+C_WHITE = rgb(255, 255, 255)
+C_GREY = rgb(60, 60, 60)
+C_RED = rgb(255, 50, 50)
+
+# --- FONT ---
+FONT = {
+    'O': ["   ▄██████▄   ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "   ▀██████▀   "],
+    'P': ["   ▄███████▄  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  █████████▀  ", "  ███         ", "  ███         ", "  ▄████▀      "],
+    'U': ["  ▄██    ██▄  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "   ▀██████▀   "]
+}
+
+def get_size(): return shutil.get_terminal_size((80, 24))
+def hide_cursor(): sys.stdout.write("\033[?25l")
+def show_cursor(): sys.stdout.write("\033[?25h")
+
+class Star:
+    def __init__(self, w, h): self.reset(w, h, True)
+    def reset(self, w, h, first=False):
+        self.x = random.randint(0, w - 1)
+        self.y = random.randint(0, h - 1) if first else -1
+        self.speed = random.uniform(0.05, 0.4)
+        self.char = random.choice([".", "·", "`"])
+    def update(self, h):
+        self.y += self.speed
+        if self.y >= h: self.y = 0
+
+def render_box(lines, w, h):
+    box_w = 64
+    sx = (w - box_w) // 2
+    sy = (h // 2) + 6
+    out = []
+    out.append(f"\033[{sy};{sx}H" + C_CYAN + "╔" + "═"*(box_w-2) + "╗" + RESET)
+    for i, line in enumerate(lines):
+        txt = line[:box_w-4]
+        out.append(f"\033[{sy+1+i};{sx}H" + C_CYAN + "║ " + C_WHITE + f"{txt:<{box_w-4}}" + C_CYAN + " ║" + RESET)
+    out.append(f"\033[{sy+len(lines)+1};{sx}H" + C_CYAN + "╚" + "═"*(box_w-2) + "╝" + RESET)
+    return "".join(out)
+
+def main():
+    os.system('clear')
+    hide_cursor()
+    stars = [Star(*get_size()) for _ in range(STAR_COUNT)]
+    t = 0
+    final_data = None
+    
+    try:
+        while True:
+            w, h = get_size()
+            output = ""
+            
+            # STATE
+            status_msg = "INITIALIZING..."
+            if os.path.exists(STATUS_FILE):
+                with open(STATUS_FILE) as f: status_msg = f.read().strip()
+            
+            if os.path.exists(RESULT_FILE) and final_data is None:
+                with open(RESULT_FILE) as f: final_data = f.readlines()
+                status_msg = "SYSTEM ONLINE"
+
+            # BG
+            grid = [[" " for _ in range(w)] for _ in range(h)]
+            for s in stars:
+                s.update(h)
+                if 0 <= int(s.y) < h and 0 <= int(s.x) < w: grid[int(s.y)][int(s.x)] = C_GREY + s.char + RESET
+            output += "\033[H"
+            for row in grid: output += "".join(row) + "\n"
+
+            # LOGO
+            logo_w = sum(len(FONT[c][0]) for c in TEXT_STRING)
+            start_x = (w - logo_w) // 2
+            start_y = (h // 2) - 6
+            curr_x = start_x
+            for char in TEXT_STRING:
+                for i, line in enumerate(FONT[char]):
+                    col = C_RED if random.random() < 0.01 else C_CYAN
+                    output += f"\033[{start_y + i};{curr_x}H{col}{line}{RESET}"
+                curr_x += len(FONT[char][0])
+
+            # UI
+            if final_data:
+                output += render_box([l.strip() for l in final_data], w, h)
+            else:
+                bar_w = 40
+                fill = int((math.sin(t*0.2) + 1) / 2 * bar_w)
+                bar = "█" * fill + "░" * (bar_w - fill)
+                bx = (w - bar_w) // 2
+                by = (h // 2) + 4
+                output += f"\033[{by};{bx}H{C_CYAN}{status_msg}{RESET}"
+                output += f"\033[{by+1};{bx}H{C_CYAN}{bar}{RESET}"
+
+            sys.stdout.write(output)
+            sys.stdout.flush()
+            t += SPEED
+            time.sleep(1/FPS)
+
+    except KeyboardInterrupt:
+        os.system('clear')
+        show_cursor()
+
+if __name__ == "__main__":
+    main()
+PY_EOF
+
+###############################################################################
+# 5. LOGIC: LOAD SAVED (FAST PATH)
+###############################################################################
+
+load_existing_state() {
+    # If the user chose "Load", we just generate the Result File immediately.
+    # The Python script picks it up and shows the "Online" screen instantly.
+    
+    # Get IP
+    if [ -f "$VAULT/infrastructure_report.txt" ]; then
+        IP=$(grep -A 5 "THE BRAIN" "$VAULT/infrastructure_report.txt" | grep "IP:" | awk '{print $2}')
+    else
+        IP=$(qm guest cmd $VMID network-get-interfaces 2>/dev/null | grep -oP '(?<="ip-address":")\d+\.\d+\.\d+\.\d+' | grep -v '127.0.0.1' | head -1)
+    fi
+    
+    [ -z "$IP" ] && IP="UNKNOWN (CHECK VM)"
+
+    cat << EOF > "$RESULT_FILE"
+  SYSTEM MONITOR // ACTIVE
+  -----------------------------
+  COOLIFY:  http://$IP:8000
+  JUPYTER:  http://$IP:8888
+  SSH:      ssh $USER@$IP
+  PASS:     $PASS
+  
+  [GUARD STATUS]
+  LXC ID:   $CTID (Online)
+  Tunnel:   Active
+EOF
+}
+
+###############################################################################
+# 6. LOGIC: BUILDER (SLOW PATH)
+###############################################################################
+
+run_builder() {
+    # NETWORK
+    echo "SCANNING NETWORK TOPOLOGY" > "$STATUS_FILE"
+    HOST_IP=$(hostname -I | awk '{print $1}')
+    GATEWAY=$(ip route | grep default | awk '{print $3}' | head -1)
+    PREFIX=$(echo $HOST_IP | cut -d'.' -f1-3)
+    IP_BRAIN="${PREFIX}.222/24"
+    IP_GUARD="${PREFIX}.250/24"
+    IP_BRAIN_PURE="${PREFIX}.222"
+    
+    # SANITIZE
+    echo "SANITIZING HOST ENVIRONMENT" > "$STATUS_FILE"
+    rm /var/lib/apt/lists/lock >/dev/null 2>&1
+    grep -rIl "enterprise.proxmox.com" /etc/apt/sources.list* | while read -r f; do mv "$f" "${f}.disabled"; done
+    echo "deb http://download.proxmox.com/debian/pve bookworm pve-no-subscription" > /etc/apt/sources.list.d/pve-no-subscription.list
+    apt-get update -qq >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y genisoimage sshpass whois openssl jq wget curl net-tools >/dev/null 2>&1
+
+    # ASSETS
+    echo "DOWNLOADING CLOUD ASSETS" > "$STATUS_FILE"
+    IMG="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+    PATH="/var/lib/vz/template/iso/ubuntu-24.04-cloud.img"
+    mkdir -p "/var/lib/vz/template/iso"
+    [ ! -f "$PATH" ] && wget -q "$IMG" -O "$PATH"
+    
+    echo "GENERATING CRYPTO KEYS" > "$STATUS_FILE"
+    KEY="/tmp/key"
+    rm -f $KEY $KEY.pub
+    ssh-keygen -t ed25519 -f $KEY -N "" -q
+    PUB=$(cat $KEY.pub)
+
+    # GUARD
+    echo "CONSTRUCTING GUARD (CT $CTID)" > "$STATUS_FILE"
+    pct destroy $CTID -purge >/dev/null 2>&1 || true
+    pveam update >/dev/null 2>&1
+    TPL="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+    [ ! -f "/var/lib/vz/template/cache/$TPL" ] && pveam download local $TPL >/dev/null 2>&1
+    pct create $CTID local:vztmpl/$TPL --hostname $CT_NAME --memory 512 --cores 1 \
+        --net0 name=eth0,bridge=vmbr0,ip=$IP_GUARD,gw=$GATEWAY --storage local-lvm --password $PASS \
+        --features nesting=1 --unprivileged 1 --start 1 >/dev/null 2>&1
+    pct exec $CTID -- bash -c "apt-get update >/dev/null && apt-get install -y curl >/dev/null"
+    pct exec $CTID -- bash -c "curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb >/dev/null 2>&1"
+    pct exec $CTID -- bash -c "dpkg -i cloudflared.deb >/dev/null 2>&1"
+
+    # BRAIN
+    echo "FABRICATING BRAIN (VM $VMID)" > "$STATUS_FILE"
+    qm stop $VMID >/dev/null 2>&1
+    qm destroy $VMID >/dev/null 2>&1
+    mkdir -p /var/lib/vz/snippets
+    cat << EOF > /var/lib/vz/snippets/user-data-$VMID.yaml
+#cloud-config
+hostname: $VM_NAME
+users:
+  - name: $USER
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys: ["$PUB"]
+    passwd: $(openssl passwd -6 "$PASS")
+packages: [qemu-guest-agent, wget, curl]
+runcmd:
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
+  - sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+EOF
+    qm create $VMID --name "$VM_NAME" --memory 8192 --cores 4 --net0 virtio,bridge=vmbr0 --scsihw virtio-scsi-pci --agent enabled=1 >/dev/null 2>&1
+    qm importdisk $VMID $PATH local-lvm >/dev/null 2>&1
+    qm set $VMID --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-$VMID-disk-0,ssd=1,discard=on >/dev/null 2>&1
+    qm resize $VMID scsi0 +80G >/dev/null 2>&1
+    qm set $VMID --boot c --bootdisk scsi0 --ide2 local-lvm:cloudinit --cicustom "user=local:snippets/user-data-$VMID.yaml" --ciuser $USER --ipconfig0 ip=$IP_BRAIN,gw=$GATEWAY >/dev/null 2>&1
+    
+    echo "IGNITION SEQUENCE" > "$STATUS_FILE"
+    qm start $VMID
+    while ! ping -c 1 -W 1 $IP_BRAIN_PURE >/dev/null 2>&1; do sleep 2; done
+    echo "ESTABLISHING UPLINK" > "$STATUS_FILE"
+    for i in {1..30}; do
+        if timeout 2 ssh -i $KEY -o StrictHostKeyChecking=no $USER@$IP_BRAIN_PURE "echo ready" >/dev/null 2>&1; then break; fi
+        sleep 2
+    done
+
+    # PAYLOAD
+    echo "INJECTING AI FORGE (PLEASE WAIT)" > "$STATUS_FILE"
+    cat << 'REMOTESCRIPT' > /tmp/install.sh
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 2; done
+sudo apt-get update >/dev/null
+sudo apt-get install -y curl wget git zip cmatrix >/dev/null
+curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash >/dev/null 2>&1
+mkdir -p ~/miniconda3
+wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3 >/dev/null
+~/miniconda3/bin/conda init bash >/dev/null
+source ~/miniconda3/bin/activate
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu >/dev/null 2>&1
+pip install langchain langgraph langchain-openai >/dev/null 2>&1
+curl -fsSL https://ollama.com/install.sh | sh >/dev/null 2>&1
+if ! grep -q "cmatrix" ~/.bashrc; then echo "clear; timeout 2s cmatrix -b -u 2; clear" >> ~/.bashrc; fi
+REMOTESCRIPT
+
+    scp -q -i $KEY -o StrictHostKeyChecking=no /tmp/install.sh $USER@$IP_BRAIN_PURE:/tmp/install.sh
+    ssh -i $KEY -o StrictHostKeyChecking=no $USER@$IP_BRAIN_PURE "chmod +x /tmp/install.sh && /tmp/install.sh" >/dev/null 2>&1
+
+    # VAULT
+    mkdir -p "$VAULT"
+    mv $KEY "$VAULT/id_ed25519_vm$VMID"
+    mv "${KEY}.pub" "$VAULT/id_ed25519_vm$VMID.pub"
+    chmod 600 "$VAULT/id_ed25519_vm$VMID"
+
+    # DONE
+    cat << EOF > "$RESULT_FILE"
+  ACCESS GRANTED
+  -----------------------------
+  COOLIFY:  http://$IP_BRAIN_PURE:8000
+  JUPYTER:  http://$IP_BRAIN_PURE:8888
+  SSH:      ssh $USER@$IP_BRAIN_PURE
+  PASS:     $PASS
+  
+  [ACTION REQUIRED]
+  Connect Guard to Cloudflare:
+  pct exec $CTID -- <cmd>
+EOF
+}
+
+###############################################################################
+# 7. EXECUTION (The Fork)
+###############################################################################
+
+if [ "$EUID" -ne 0 ]; then echo "ROOT ACCESS REQUIRED"; exit 1; fi
+
+# Decide logic based on user menu choice
+if [ "$MODE" == "LOAD" ]; then
+    load_existing_state &
+else
+    run_builder &
+fi
+
+# Run UI (Blocks until closed)
+python3 "$UI_SCRIPT"
