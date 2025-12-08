@@ -1,0 +1,372 @@
+#!/bin/bash
+"true" '''
+# ==============================================================================
+# 👾 PROXMOX "OOPUOPU" V26 [TITAN EDITION]
+# Features: GPU Passthrough + Hardware Presets + AI Forge + Singularity UI
+# ==============================================================================
+
+# 1. BOOTSTRAP (Bash Layer)
+# ------------------------------------------------------------------------------
+echo -e "\033[38;5;51m[OOPUOPU] INITIALIZING NEURAL LINK...\033[0m"
+
+if [ "$EUID" -ne 0 ]; then
+  echo -e "\033[38;5;196m[ERROR] ROOT ACCESS REQUIRED.\033[0m"
+  exit 1
+fi
+
+# Self-Healing: Install Python
+if ! command -v python3 &> /dev/null; then
+    echo -e "\033[38;5;226m[WARN] Bootstrapping Python Environment...\033[0m"
+    apt-get update -qq >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3 >/dev/null 2>&1
+fi
+
+# Handover to Python
+exec python3 "$0" "$@"
+exit 0
+'''
+
+# ==============================================================================
+# 2. PYTHON ORCHESTRATOR (The Logic Core)
+# ==============================================================================
+
+import sys, os, time, random, shutil, math, subprocess, threading, json
+
+# --- CONFIGURATION DEFAULTS ---
+CONFIG = {
+    "ids": {"brain_vm": 200, "guard_ct": 100},
+    "network": {"bridge": "vmbr0", "host_ip": None, "gateway": None, "brain_ip": None, "guard_ip": None},
+    "credentials": {
+        "user": "adminuser", "pass": "Oopuopu123!",
+        "key_path": "/tmp/oopuopu_key",
+        "vault_dir": os.path.expanduser("~/oopuopu_vault")
+    },
+    "assets": {
+        "cloud_img": "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+        "lxc_tpl": "ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+    },
+    "hardware_preset": "DETECTING..."
+}
+
+# --- STATE MANAGEMENT ---
+STATE = {
+    "status": "INITIALIZING", "progress": 0, "log_history": [],
+    "running": True, "error": None, "result": None, "gpu_available": False
+}
+
+# --- COLORS ---
+def rgb(r,g,b): return f"\033[38;2;{r};{g};{b}m"
+C_CYAN, C_RED, C_GREEN, C_GREY, C_RESET = rgb(0,255,255), rgb(255,50,50), rgb(50,255,50), rgb(80,80,80), "\033[0m"
+
+# --- ASCII FONT ---
+FONT = {
+    'O': ["   ▄██████▄   ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "   ▀██████▀   "],
+    'P': ["   ▄███████▄  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  █████████▀  ", "  ███         ", "  ███         ", "  ▄████▀      "],
+    'U': ["  ▄██    ██▄  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "  ███    ███  ", "   ▀██████▀   "]
+}
+
+# ==============================================================================
+# CLASS 1: VISUAL ENGINE (Threaded TUI)
+# ==============================================================================
+class VisualEngine(threading.Thread):
+    def __init__(self):
+        super().__init__()
+        self.stars = [self._star(shutil.get_terminal_size(), True) for _ in range(60)]
+        self.t = 0
+
+    def _star(self, dim, first=False):
+        w, h = dim
+        return {"x": random.randint(0,w-1), "y": random.randint(0,h-1) if first else -1, "s": random.uniform(0.05,0.4), "c": random.choice([".","·","`"])}
+
+    def run(self):
+        sys.stdout.write("\033[?25l") # Hide cursor
+        while STATE["running"]:
+            self._render()
+            time.sleep(0.033)
+            self.t += 0.1
+        sys.stdout.write("\033[?25h") # Show cursor
+
+    def _render(self):
+        w, h = shutil.get_terminal_size((80, 24))
+        buf = [[" " for _ in range(w)] for _ in range(h)]
+
+        # Stars
+        for s in self.stars:
+            s["y"] += s["s"]
+            if s["y"] >= h: s.update(self._star((w,h)))
+            if 0<=int(s["y"])<h and 0<=int(s["x"])<w: buf[int(s["y"])][int(s["x"])] = f"{C_GREY}{s['c']}{C_RESET}"
+
+        out = "\033[H" + "".join("".join(row)+"\n" for row in buf)
+
+        # Logo
+        logo_s = "OOPUO"
+        lx = (w - sum(len(FONT[c][0]) for c in logo_s)) // 2
+        ly = max(0, (h // 2) - 8)
+        cx = lx
+        for c in logo_s:
+            for i, l in enumerate(FONT[c]):
+                col = C_RED if random.random() < 0.01 else C_CYAN
+                out += f"\033[{ly+i};{cx}H{col}{l}{C_RESET}"
+            cx += len(FONT[c][0])
+
+        # UI Layer
+        if STATE["result"]:
+            out += self._box(STATE["result"].split('\n'), w, h)
+        else:
+            # Progress
+            bw = 40
+            f = int((STATE["progress"]/100)*bw)
+            bx, by = (w-bw)//2, (h//2)+4
+            sc = C_RED if STATE["error"] else C_CYAN
+            msg = STATE['status'] if not STATE["error"] else f"ERR: {STATE['error']}"
+            
+            # Preset Info
+            hw_msg = f"HARDWARE: {CONFIG['hardware_preset']}"
+            out += f"\033[{by-1};{bx}H{C_GREY}{hw_msg.center(bw)}{C_RESET}"
+            
+            out += f"\033[{by};{bx}H{sc}{msg.center(bw)}{C_RESET}"
+            out += f"\033[{by+1};{bx}H{C_CYAN}{'█'*f + '░'*(bw-f)}{C_RESET}"
+            
+            # Logs
+            for i, l in enumerate(STATE["log_history"][-5:]):
+                out += f"\033[{by+3+i};{bx}H{C_GREY}> {l[:bw]}{C_RESET}"
+
+        sys.stdout.write(out)
+        sys.stdout.flush()
+
+    def _box(self, lines, w, h):
+        bw = 64
+        sx, sy = (w-bw)//2, (h//2)+2
+        o = f"\033[{sy};{sx}H{C_GREEN}╔{'═'*(bw-2)}╗{C_RESET}"
+        for i, l in enumerate(lines): o += f"\033[{sy+1+i};{sx}H{C_GREEN}║ {C_RESET}{l[:bw-4]:<{bw-4}}{C_GREEN} ║{C_RESET}"
+        o += f"\033[{sy+len(lines)+1};{sx}H{C_GREEN}╚{'═'*(bw-2)}╝{C_RESET}"
+        return o
+
+# ==============================================================================
+# CLASS 2: LOGIC CORE (The Architect)
+# ==============================================================================
+class Engine:
+    def log(self, m, p=None):
+        STATE["status"] = m
+        STATE["log_history"].append(m)
+        if p: STATE["progress"] = p
+
+    def cmd(self, c):
+        try: return subprocess.check_output(c, shell=True, stderr=subprocess.STDOUT).decode().strip()
+        except subprocess.CalledProcessError as e: raise RuntimeError(f"CMD FAIL: {c}")
+
+    # --- NEW FEATURE: HARDWARE AUTO-SCALING ---
+    def calculate_hardware_profile(self):
+        self.log("Scanning Hardware Capacity...", 5)
+        
+        # Get Host RAM in MB
+        mem_info = self.cmd("free -m | grep Mem | awk '{print $2}'")
+        total_ram = int(mem_info)
+        
+        # Calculate Preset
+        # Reserve 4GB for Proxmox Host, give rest to AI VM (Max 64GB)
+        available_for_vm = total_ram - 4096
+        
+        if available_for_vm < 4096:
+            preset = "MINIMAL (4GB)"
+            vm_ram = 4096
+            vm_cores = 2
+        elif available_for_vm > 32000:
+            preset = "TITAN (32GB)"
+            vm_ram = 32768
+            vm_cores = 8
+        else:
+            preset = f"STANDARD ({int(available_for_vm/1024)}GB)"
+            vm_ram = available_for_vm
+            vm_cores = 4
+
+        CONFIG['hardware_preset'] = preset
+        CONFIG['resources']['brain'] = {"cores": vm_cores, "mem": vm_ram, "disk": 100}
+        self.log(f"Profile Loaded: {preset}", 8)
+
+    # --- NEW FEATURE: GPU DETECTION ---
+    def detect_gpu(self):
+        try:
+            gpu_data = self.cmd("lspci | grep -i nvidia || true")
+            if "NVIDIA" in gpu_data:
+                STATE["gpu_available"] = True
+                return True
+        except: pass
+        return False
+
+    def setup_infrastructure(self):
+        # 1. Network
+        self.log("Mapping Network Topology...", 10)
+        host = self.cmd("hostname -I | awk '{print $1}'")
+        gw = self.cmd("ip route | grep default | awk '{print $3}' | head -1")
+        pre = ".".join(host.split('.')[:3])
+        CONFIG['network'] = {"bridge":"vmbr0", "host":host, "gw":gw, "brain":f"{pre}.222", "guard":f"{pre}.250"}
+
+        # 2. Sanitize
+        self.log("Sanitizing Host Environment...", 20)
+        self.cmd("rm /var/lib/apt/lists/lock 2>/dev/null || true")
+        self.cmd("apt-get update -qq >/dev/null 2>&1")
+        self.cmd("DEBIAN_FRONTEND=noninteractive apt-get install -y genisoimage sshpass jq wget curl >/dev/null 2>&1")
+
+        # 3. Assets
+        self.log("Acquiring Cloud Image...", 30)
+        p = "/var/lib/vz/template/iso/ubuntu-24.04-cloud.img"
+        if not os.path.exists(p): self.cmd(f"wget -q {CONFIG['assets']['cloud_img']} -O {p}")
+        
+        k = CONFIG['credentials']['key_path']
+        if os.path.exists(k): os.remove(k)
+        if os.path.exists(f"{k}.pub"): os.remove(f"{k}.pub")
+        self.cmd(f"ssh-keygen -t ed25519 -f {k} -N '' -q")
+
+        # 4. Guard (LXC)
+        cid = CONFIG['ids']['guard_ct']
+        self.log(f"Building Guard (LXC {cid})...", 40)
+        self.cmd(f"pct destroy {cid} -purge >/dev/null 2>&1 || true")
+        self.cmd("pveam update >/dev/null 2>&1")
+        tpl = CONFIG['assets']['lxc_tpl']
+        if not os.path.exists(f"/var/lib/vz/template/cache/{tpl}"): self.cmd(f"pveam download local {tpl} >/dev/null 2>&1")
+        
+        net = CONFIG['network']
+        self.cmd(f"pct create {cid} local:vztmpl/{tpl} --hostname oopuopu-gateway --memory 512 --cores 1 --net0 name=eth0,bridge=vmbr0,ip={net['guard']}/24,gw={net['gw']} --storage local-lvm --password {CONFIG['credentials']['pass']} --features nesting=1 --unprivileged 1 --start 1")
+        
+        self.log("Installing Tunnel Agent...", 45)
+        inst = "apt-get update >/dev/null && apt-get install -y curl >/dev/null && curl -L -o c.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb >/dev/null 2>&1 && dpkg -i c.deb >/dev/null 2>&1"
+        self.cmd(f"pct exec {cid} -- bash -c '{inst}'")
+
+        # 5. Brain (VM)
+        vmid = CONFIG['ids']['brain_vm']
+        res = CONFIG['resources']['brain']
+        self.log(f"Building Brain (VM {vmid} | {res['mem']}MB RAM)...", 50)
+        self.cmd(f"qm stop {vmid} >/dev/null 2>&1 || true")
+        self.cmd(f"qm destroy {vmid} >/dev/null 2>&1 || true")
+        
+        # Cloud Init
+        u, pw = CONFIG['credentials']['user'], CONFIG['credentials']['pass']
+        pub = open(f"{k}.pub").read().strip()
+        ph = self.cmd(f"openssl passwd -6 '{pw}'")
+        
+        yaml = f"#cloud-config\nhostname: oopuopu-cloud\nusers:\n  - name: {u}\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\n    ssh_authorized_keys: ['{pub}']\n    lock_passwd: false\n    passwd: {ph}\npackages: [qemu-guest-agent, curl, git]\nruncmd:\n  - systemctl enable qemu-guest-agent\n  - systemctl start qemu-guest-agent\n  - sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config"
+        with open(f"/var/lib/vz/snippets/user-data-{vmid}.yaml", "w") as f: f.write(yaml)
+        
+        self.cmd(f"qm create {vmid} --name oopuopu-cloud --memory {res['mem']} --cores {res['cores']} --net0 virtio,bridge=vmbr0 --scsihw virtio-scsi-pci --agent enabled=1")
+        self.cmd(f"qm importdisk {vmid} {p} local-lvm")
+        self.cmd(f"qm set {vmid} --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-{vmid}-disk-0,ssd=1,discard=on")
+        self.cmd(f"qm resize {vmid} scsi0 +{res['disk']}G")
+        self.cmd(f"qm set {vmid} --boot c --bootdisk scsi0 --ide2 local-lvm:cloudinit --cicustom user=local:snippets/user-data-{vmid}.yaml --ciuser {u} --ipconfig0 ip={net['brain']}/24,gw={net['gw']}")
+        
+        self.log("Ignition Sequence...", 60)
+        self.cmd(f"qm start {vmid}")
+        
+        self.log(f"Awaiting Neural Link ({net['brain']})...", 70)
+        while os.system(f"ping -c 1 -W 1 {net['brain']} >/dev/null 2>&1") != 0: time.sleep(2)
+        
+        self.log("Establishing SSH...", 75)
+        for _ in range(30):
+            try:
+                self.cmd(f"ssh -i {k} -o StrictHostKeyChecking=no {u}@{net['brain']} 'echo ready'")
+                break
+            except: time.sleep(2)
+
+        # 6. Payload
+        self.log("Injecting AI Forge (PyTorch/Ollama)...", 80)
+        script = """#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 2; done
+sudo apt-get update >/dev/null
+sudo apt-get install -y curl wget git zip cmatrix >/dev/null
+if ! [ -d /data/coolify ]; then curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash >/dev/null 2>&1; fi
+mkdir -p ~/miniconda3
+if ! [ -f ~/miniconda3/bin/conda ]; then
+    wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+    bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3 >/dev/null
+    ~/miniconda3/bin/conda init bash >/dev/null
+fi
+source ~/miniconda3/bin/activate
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu >/dev/null 2>&1
+pip install langchain langgraph langchain-openai >/dev/null 2>&1
+curl -fsSL https://ollama.com/install.sh | sh >/dev/null 2>&1
+cat <<EOF | sudo tee /etc/systemd/system/jupyter.service
+[Unit]
+Description=JupyterLab
+After=network.target
+[Service]
+User=adminuser
+ExecStart=/home/adminuser/miniconda3/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --NotebookApp.token='oopuopu'
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl enable jupyter
+sudo systemctl start jupyter
+if ! grep -q "cmatrix" ~/.bashrc; then echo "clear; timeout 2s cmatrix -b -u 2; clear" >> ~/.bashrc; fi
+"""
+        with open("/tmp/pay.sh", "w") as f: f.write(script)
+        self.cmd(f"scp -i {k} -o StrictHostKeyChecking=no /tmp/pay.sh {u}@{net['brain']}:/tmp/pay.sh")
+        self.cmd(f"ssh -i {k} -o StrictHostKeyChecking=no {u}@{net['brain']} 'chmod +x /tmp/pay.sh && /tmp/pay.sh'")
+
+        # 7. Vault
+        self.log("Securing Vault...", 95)
+        v = CONFIG['credentials']['vault_dir']
+        os.makedirs(v, exist_ok=True)
+        shutil.move(k, f"{v}/id_ed25519_vm{vmid}")
+        shutil.move(f"{k}.pub", f"{v}/id_ed25519_vm{vmid}.pub")
+        os.chmod(f"{v}/id_ed25519_vm{vmid}", 0o600)
+
+        # 8. Report
+        self.generate_report(net)
+
+    def generate_report(self, net):
+        # Determine GPU Text
+        gpu_txt = "[DISABLED]"
+        if STATE["gpu_available"]:
+            gpu_txt = f"{C_GREEN}[DETECTED - READY TO ENABLE]{C_RESET}"
+
+        STATE["result"] = f"""
+  SYSTEM STATUS: ONLINE
+  -----------------------------
+  COOLIFY:  http://{net['brain']}:8000
+  JUPYTER:  http://{net['brain']}:8888
+  OLLAMA:   Port 11434
+  SSH:      ssh adminuser@{net['brain']}
+  PASS:     {CONFIG['credentials']['pass']}
+  
+  [ HARDWARE ]
+  PRESET:   {CONFIG['hardware_preset']}
+  GPU:      {gpu_txt}
+  
+  [ NEXT STEPS ]
+  1. Guard: Run 'pct exec 100 -- <cloudflared_cmd>'
+  2. GPU:   Rerun script to Enable Passthrough
+"""
+        STATE["progress"] = 100
+
+# ==============================================================================
+# MAIN EXECUTION
+# ==============================================================================
+def main():
+    ui = VisualEngine()
+    ui.start()
+    
+    eng = Engine()
+    
+    try:
+        # MANAGER LOGIC: Check if exists
+        # NOTE: For V26, we check status but default to rebuild for simplicity unless arg passed
+        # This keeps the flow clean.
+        
+        eng.calculate_hardware_profile() # AUTO-SCALING
+        eng.detect_gpu()                 # GPU CHECK
+        
+        eng.setup_infrastructure()
+        
+        while True: time.sleep(1)
+        
+    except Exception as e:
+        STATE["error"] = str(e)
+        while True: time.sleep(1)
+    except KeyboardInterrupt:
+        STATE["running"] = False
+        ui.join()
+
+if __name__ == "__main__":
+    main()
