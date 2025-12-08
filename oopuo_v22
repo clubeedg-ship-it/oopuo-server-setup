@@ -1,0 +1,381 @@
+#!/bin/bash
+
+###############################################################################
+# 👾 PROXMOX "OOPUOPU" V22 [THE AI FORGE]
+# Features: V21 Architecture + PyTorch, Jupyter, LangGraph, Ollama
+###############################################################################
+
+# Disable instant exit for manual menu handling
+set +e
+
+# 🎨 THE CYBERPUNK PALETTE
+RESET='\033[0m'
+BOLD='\033[1m'
+C_CYAN='\033[38;5;51m'
+C_PINK='\033[38;5;198m'
+C_LIME='\033[38;5;46m'
+C_PURP='\033[38;5;129m'
+C_WARN='\033[38;5;226m'
+C_GREY='\033[38;5;240m'
+
+# 🔧 CONFIGURATION
+VMID=200
+VM_NAME="oopuopu-cloud"
+VM_CORES=4
+VM_MEMORY=8192
+VM_DISK=80
+VM_USER="adminuser"
+FIXED_PASSWORD="Oopuopu123!" 
+TEMP_KEY="/tmp/oopuopu_key"
+
+# LXC Config
+CTID=100
+CT_NAME="oopuopu-gateway"
+CT_MEMORY=512
+CT_DISK=4
+CT_TEMPLATE="ubuntu-24.04-standard_24.04-2_amd64.tar.zst"
+
+# Shared
+STORAGE="local-lvm"
+BRIDGE="vmbr0"
+VAULT_DIR="$HOME/oopuopu_vault"
+CRED_FILE="$VAULT_DIR/infrastructure_report.txt"
+
+###############################################################################
+# 🎬 VISUAL ENGINE
+###############################################################################
+
+clear_screen() { clear; }
+
+draw_header() {
+    clear_screen
+    echo -e "${C_CYAN}"
+    cat << "EOF"
+   ▄██████▄   ▄██████▄   ▄███████▄  ███    ███   ▄██████▄  
+  ███    ███ ███    ███  ███    ███ ███    ███  ███    ███ 
+  ███    ███ ███    ███  ███    ███ ███    ███  ███    ███ 
+  ███    ███ ███    ███  ███    ███ ███    ███  ███    ███ 
+  ███    ███ ███    ███  █████████▀  ███    ███  ███    ███ 
+  ███    ███ ███    ███  ███        ███    ███  ███    ███ 
+  ███    ███ ███    ███  ███        ███    ███  ███    ███ 
+   ▀██████▀   ▀██████▀   ▄████▀      ▀██████▀    ▀██████▀  
+EOF
+    echo -e "${C_PINK}   >> AI FORGE V22 // HEAVY INDUSTRY <<${RESET}"
+    echo ""
+}
+
+log() { echo -e "${C_CYAN}➜ ${BOLD}[SYS]${RESET} $1"; }
+success() { echo -e "${C_LIME}✔ ${BOLD}[SUCCESS] ${RESET} $1"; }
+warn() { echo -e "${C_WARN}⚠ ${BOLD}[WARNING]${RESET} $1"; }
+
+cyber_loader() {
+    local pid=$1
+    local delay=0.05
+    tput civis
+    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
+        RAND_HEX=$(openssl rand -hex 4)
+        printf "\r   ${C_PINK}[INSTALLING]${RESET} ${C_CYAN}MODULE::0x%s${RESET} " "$RAND_HEX"
+        sleep $delay
+    done
+    printf "\r\033[K" 
+    tput cnorm
+}
+
+###############################################################################
+# 1. NETWORK & SANITIZATION
+###############################################################################
+
+prepare_environment() {
+    draw_header
+    log "Analyzing Network Topology..."
+    
+    HOST_IP=$(hostname -I | awk '{print $1}')
+    GATEWAY=$(ip route | grep default | awk '{print $3}' | head -1)
+    IP_PREFIX=$(echo $HOST_IP | cut -d'.' -f1-3)
+    
+    # Calculate Targets
+    IP_BRAIN="${IP_PREFIX}.222/24"
+    IP_GUARD="${IP_PREFIX}.250/24"
+    IP_BRAIN_PURE="${IP_PREFIX}.222"
+    
+    echo -e "    Router:      ${C_CYAN}$GATEWAY${RESET}"
+    echo -e "    The Brain:   ${C_LIME}$IP_BRAIN${RESET} (VM $VMID)"
+    echo -e "    The Guard:   ${C_LIME}$IP_GUARD${RESET} (CT $CTID)"
+    echo ""
+    read -p "    Press ENTER to Execute AI Forge Construction..." confirm
+    
+    # Sanitize Host
+    log "Sanitizing Host Environment..."
+    rm /var/lib/apt/lists/lock 2>/dev/null || true
+    
+    # Fix Repos (Silent)
+    grep -rIl "enterprise.proxmox.com" /etc/apt/sources.list* | while read -r file; do
+        [[ "$file" == *".disabled" ]] && continue
+        mv "$file" "${file}.disabled"
+    done
+    CODENAME=$(grep "VERSION_CODENAME=" /etc/os-release | cut -d= -f2)
+    [ -z "$CODENAME" ] && CODENAME="bookworm"
+    echo "deb http://download.proxmox.com/debian/pve $CODENAME pve-no-subscription" > /etc/apt/sources.list.d/pve-no-subscription.list
+    
+    (apt-get update -o Acquire::AllowInsecureRepositories=true --allow-releaseinfo-change -y >/dev/null 2>&1) &
+    cyber_loader $!
+    
+    DEBIAN_FRONTEND=noninteractive apt-get install -y genisoimage sshpass whois openssl jq wget curl net-tools > /dev/null 2>&1
+    success "Environment Stabilized."
+}
+
+###############################################################################
+# 2. DEPLOY: THE GUARD (LXC GATEWAY)
+###############################################################################
+
+deploy_guard() {
+    log "Phase 1: Constructing The Guard (LXC $CTID)..."
+    
+    if pct status $CTID &>/dev/null; then
+        warn "Destroying old Guard..."
+        pct stop $CTID &>/dev/null || true
+        pct destroy $CTID &>/dev/null || true
+    fi
+    
+    # Get Template
+    pveam update >/dev/null
+    if [ ! -f "/var/lib/vz/template/cache/$CT_TEMPLATE" ]; then
+        pveam download local $CT_TEMPLATE >/dev/null
+    fi
+    
+    # Build
+    pct create $CTID local:vztmpl/$CT_TEMPLATE \
+        --hostname $CT_NAME --memory $CT_MEMORY --cores 1 \
+        --net0 name=eth0,bridge=$BRIDGE,ip=$IP_GUARD,gw=$GATEWAY \
+        --storage $STORAGE --password $FIXED_PASSWORD \
+        --features nesting=1 --unprivileged 1 --start 1 >/dev/null
+        
+    success "Guard Online ($IP_GUARD)."
+    
+    log "Installing Tunnel Software..."
+    pct exec $CTID -- bash -c "apt-get update >/dev/null && apt-get install -y curl >/dev/null"
+    pct exec $CTID -- bash -c "curl -L --output cloudflared.deb https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb >/dev/null 2>&1"
+    pct exec $CTID -- bash -c "dpkg -i cloudflared.deb >/dev/null 2>&1"
+    
+    success "Guard Ready for Orders."
+}
+
+###############################################################################
+# 3. DEPLOY: THE BRAIN (VM 200)
+###############################################################################
+
+deploy_brain() {
+    log "Phase 2: Constructing The Brain (VM $VMID)..."
+    
+    if qm status $VMID &>/dev/null; then
+        warn "Destroying old Brain..."
+        qm stop $VMID --skiplock 1 &>/dev/null || true
+        qm destroy $VMID --purge 1 --skiplock 1 &>/dev/null
+    fi
+
+    # Assets
+    IMG_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+    IMG_PATH="/var/lib/vz/template/iso/ubuntu-24.04-cloud.img"
+    mkdir -p "/var/lib/vz/template/iso"
+    if [ ! -f "$IMG_PATH" ]; then
+        wget --show-progress --progress=bar:force:noscroll "$IMG_URL" -O "$IMG_PATH"
+    fi
+    
+    # Keys
+    rm -f $TEMP_KEY $TEMP_KEY.pub
+    ssh-keygen -t ed25519 -f $TEMP_KEY -N "" -q
+    PUB_KEY=$(cat $TEMP_KEY.pub)
+
+    # Cloud Init
+    mkdir -p /var/lib/vz/snippets
+    cat << EOF > /var/lib/vz/snippets/user-data-$VMID.yaml
+#cloud-config
+hostname: $VM_NAME
+manage_etc_hosts: true
+users:
+  - name: $VM_USER
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: users, admin
+    shell: /bin/bash
+    ssh_authorized_keys:
+      - $PUB_KEY
+    lock_passwd: false
+    passwd: $(openssl passwd -6 "$FIXED_PASSWORD")
+package_update: true
+packages:
+  - qemu-guest-agent
+  - wget
+  - curl
+  - git
+runcmd:
+  - systemctl enable qemu-guest-agent
+  - systemctl start qemu-guest-agent
+  - sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+EOF
+
+    # Build (Silent)
+    (
+        qm create $VMID --name "$VM_NAME" --memory $VM_MEMORY --cores $VM_CORES --cpu host \
+        --net0 virtio,bridge=$BRIDGE --scsihw virtio-scsi-pci --agent enabled=1 --ostype l26 
+        qm importdisk $VMID $IMG_PATH $STORAGE 
+        qm set $VMID --scsihw virtio-scsi-pci --scsi0 $STORAGE:vm-$VMID-disk-0,ssd=1,discard=on 
+        qm resize $VMID scsi0 +${VM_DISK}G 
+        qm set $VMID --boot c --bootdisk scsi0 
+        qm set $VMID --ide2 $STORAGE:cloudinit 
+        qm set $VMID --cicustom "user=local:snippets/user-data-$VMID.yaml" 
+        qm set $VMID --ciuser $VM_USER 
+        qm set $VMID --ipconfig0 ip=$IP_BRAIN,gw=$GATEWAY
+    ) >/dev/null
+    
+    success "Brain Fabricated."
+    
+    # Ignition
+    log "Booting Core..."
+    qm start $VMID
+    echo -n "    Waiting for Neural Link..."
+    while ! ping -c 1 -W 1 $IP_BRAIN_PURE >/dev/null 2>&1; do sleep 2; done
+    echo " Connected."
+    
+    echo -n "    Authenticating..."
+    for i in {1..30}; do
+        if timeout 2 ssh -i $TEMP_KEY -o StrictHostKeyChecking=no $VM_USER@$IP_BRAIN_PURE "echo ready" &>/dev/null; then
+            break
+        fi
+        sleep 2
+    done
+    success "Uplink Secure."
+    
+    # ------------------------------------------------------------------
+    # V22 PAYLOAD: THE AI FORGE
+    # ------------------------------------------------------------------
+    log "Injecting AI FORGE (PyTorch, Jupyter, LangGraph, Ollama)..."
+    log "This will take a few minutes. Stand by."
+    
+    cat << 'REMOTESCRIPT' > /tmp/install_stack.sh
+#!/bin/bash
+set +e
+# WAIT FOR LOCKS
+while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do sleep 2; done
+set -e
+export DEBIAN_FRONTEND=noninteractive
+
+# 1. CORE SYSTEM
+sudo apt-get update >/dev/null
+sudo apt-get upgrade -y >/dev/null
+sudo apt-get install -y build-essential htop curl wget git unzip zip tree jq cmatrix >/dev/null
+
+# 2. COOLIFY (PaaS)
+curl -fsSL https://cdn.coollabs.io/coolify/install.sh | bash >/dev/null 2>&1
+
+# 3. PYTHON ENGINE (Miniconda)
+mkdir -p ~/miniconda3
+wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3 >/dev/null
+rm -rf ~/miniconda3/miniconda.sh
+~/miniconda3/bin/conda init bash >/dev/null
+
+# 4. AI LIBRARIES (The Heavy Stuff)
+source ~/miniconda3/bin/activate
+# Install PyTorch (CPU version by default for compatibility, change url for CUDA)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu >/dev/null 2>&1
+# Install LangChain Ecosystem
+pip install langchain langgraph langchain-openai langchain-community >/dev/null 2>&1
+# Install JupyterLab
+pip install jupyterlab notebook >/dev/null 2>&1
+
+# 5. OLLAMA (Local LLM Server)
+curl -fsSL https://ollama.com/install.sh | sh >/dev/null 2>&1
+
+# 6. CONFIG JUPYTER SERVICE
+# Create a system service so Jupyter runs on boot
+cat <<EOF | sudo tee /etc/systemd/system/jupyter.service
+[Unit]
+Description=JupyterLab
+After=network.target
+
+[Service]
+User=$USER
+ExecStart=/home/$USER/miniconda3/bin/jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --NotebookApp.token='oopuopu'
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl enable jupyter
+sudo systemctl start jupyter
+
+# 7. VISUALS
+if ! grep -q "cmatrix" ~/.bashrc; then
+  echo "clear; timeout 2s cmatrix -b -u 2; clear" >> ~/.bashrc
+fi
+REMOTESCRIPT
+
+    scp -q -i $TEMP_KEY -o StrictHostKeyChecking=no /tmp/install_stack.sh $VM_USER@$IP_BRAIN_PURE:/tmp/install_stack.sh
+    (ssh -i $TEMP_KEY -o StrictHostKeyChecking=no $VM_USER@$IP_BRAIN_PURE "chmod +x /tmp/install_stack.sh && /tmp/install_stack.sh" >/dev/null 2>&1) &
+    SSH_PID=$!
+    cyber_loader $SSH_PID
+    wait $SSH_PID
+    
+    success "AI Forge Fully Operational."
+}
+
+###############################################################################
+# 4. VAULT & REPORT
+###############################################################################
+
+finalize() {
+    log "Securing Credentials..."
+    mkdir -p "$VAULT_DIR"
+    
+    mv $TEMP_KEY "$VAULT_DIR/id_ed25519_vm$VMID"
+    mv "${TEMP_KEY}.pub" "$VAULT_DIR/id_ed25519_vm$VMID.pub"
+    chmod 600 "$VAULT_DIR/id_ed25519_vm$VMID"
+    
+    cat << EOF > "$CRED_FILE"
+===================================================
+   OOPUOPU INFRASTRUCTURE REPORT (V22)
+===================================================
+[1] THE BRAIN (VM $VMID)
+    IP:          $IP_BRAIN_PURE
+    COOLIFY:     http://$IP_BRAIN_PURE:8000
+    JUPYTER:     http://$IP_BRAIN_PURE:8888 (Token: oopuopu)
+    OLLAMA:      http://$IP_BRAIN_PURE:11434
+    SSH:         ssh -i $VAULT_DIR/id_ed25519_vm$VMID $VM_USER@$IP_BRAIN_PURE
+    
+[2] THE GUARD (CT $CTID)
+    IP:          $IP_GUARD
+    CMD:         pct exec $CTID -- <cloudflared_command>
+===================================================
+EOF
+    chmod 600 "$CRED_FILE"
+    
+    clear_screen
+    echo -e "${C_LIME}╔════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${C_LIME}║             AI FORGE JOB COMPLETE                  ║${RESET}"
+    echo -e "${C_LIME}╚════════════════════════════════════════════════════╝${RESET}"
+    echo ""
+    echo -e " ${BOLD}1. COOLIFY (PaaS)${RESET}"
+    echo -e "    Dashboard: ${C_CYAN}http://$IP_BRAIN_PURE:8000${RESET}"
+    echo ""
+    echo -e " ${BOLD}2. JUPYTER LAB (AI Dev)${RESET}"
+    echo -e "    URL: ${C_CYAN}http://$IP_BRAIN_PURE:8888${RESET}"
+    echo -e "    Token: ${C_PINK}oopuopu${RESET}"
+    echo ""
+    echo -e " ${BOLD}3. OLLAMA (LLM Server)${RESET}"
+    echo -e "    API: ${C_CYAN}http://$IP_BRAIN_PURE:11434${RESET}"
+    echo ""
+    echo -e " ${BOLD}4. THE GUARD (Tunnel)${RESET}"
+    echo -e "    Run install command: ${C_PINK}pct exec $CTID -- <cmd>${RESET}"
+    echo ""
+}
+
+###############################################################################
+# MAIN EXECUTION
+###############################################################################
+
+if [ "$EUID" -ne 0 ]; then error "ROOT ACCESS REQUIRED."; fi
+
+prepare_environment
+deploy_guard
+deploy_brain
+finalize
